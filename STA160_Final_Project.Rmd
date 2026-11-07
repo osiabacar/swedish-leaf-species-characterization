@@ -1,0 +1,1749 @@
+---
+title: "Assessing the Reliability of Shape and Color Features
+        for Swedish Tree Leaf Species Characterization"
+author: |
+  Oscar Abarca \
+  Prepared for Dr. Hsieh \
+  STA 160
+date: "June 4, 2026"
+output:
+  pdf_document:
+    toc: false
+    toc_depth: 3
+    number_sections: true
+  html_document:
+    toc: false
+    df_print: paged
+geometry: margin=1in
+---
+
+\newpage
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = FALSE,
+  warning    = FALSE,
+  message    = FALSE,
+  fig.align  = "center",
+  fig.width  = 7,
+  fig.height = 4,
+  out.width  = "90%"
+)
+```
+
+```{r setup-0, include=FALSE}
+library(magick)
+library(EBImage)
+library(ggplot2)
+library(fmsb)
+library(kableExtra)
+
+base_dir    <- "/Users/awscr/STA160_FP_leaves"
+species_ids <- 1:10
+n_images    <- 10
+threshold   <- 200
+
+species_names <- data.frame(
+  species_id   = 1:10,
+  species_code = paste0("Species_", 1:10),
+  common_name  = c(
+    "Ulmus carpinifolia",
+    "Acer",
+    "Salix aurita",
+    "Quercus",
+    "Alnus incana",
+    "Betula pubescens",
+    "Salix alba 'Sericea'",
+    "Populus tremula",
+    "Ulmus glabra",
+    "Sorbus aucuparia"
+  )
+)
+
+if (!dir.exists(base_dir)) {
+  stop("base_dir not found — check your path!")
+} else {
+  total_files <- length(list.files(base_dir, pattern = "\\.tif$"))
+  cat("Folder found! Total .tif files:", total_files, "\n")
+}
+
+get_species_files <- function(sp_num, base_dir, n = 10) {
+  pattern <- paste0("^l", sp_num, "nr.*\\.tif$")
+  files   <- list.files(base_dir,
+                        pattern     = pattern,
+                        full.names  = TRUE,
+                        ignore.case = TRUE)
+  head(files, n)
+}
+```
+
+# Introduction
+
+Accurate identification of tree species plays a critical role in
+botany, ecology, and forestry, allowing scientists to monitor
+biodiversity, support conservation efforts, and better understand
+ecological systems. Leaf identification has long depended
+on manual morphological assessment — a process that is both
+time-consuming and requires considerable botanical expertise. With
+computer vision and image analysis techniques continuously advancing,
+automated leaf classification using measurable visual features has
+become a powerful and reproducible alternative to manual
+identification.
+
+\indent The Swedish Leaf Dataset, compiled by Söderkvist (2001) at the
+Computer Vision Laboratory at Linköping University, provides an ideal case
+study for image-based species characterization. This project addresses the
+following question: to what degree do shape and color features extracted from
+scanned leaf images capture consistent within-species visual identity across
+Swedish tree species, and what do patterns of within-species consistency and
+between-species distance reveal about the reliability of image-based leaf
+characterization?
+
+\indent Söderkvist (2001) categorizes leaf features into four main groups:
+shape and outline, inner structure, color, and surface features, identifying
+shape as the most stable and reliable characteristic for species
+classification. Building on this foundation, Zheng and Wang (2010) propose
+a gray-scale morphology approach for extracting leaf vein patterns — the
+inner structural features that shape analysis alone cannot capture. Together,
+these two works provide the theoretical basis for the feature extraction
+pipeline used in this report, which combines outline-based shape features
+with RGB and HSV color features to build a precisely characterize each species.
+
+This report analyzes 10 distinct species using 10 images per species,
+yielding a total of 100 images. Shape features extracted from leaf
+outlines cover geometric properties such as size, elongation, margin
+complexity, and symmetry — how consistent these features are across
+images of the same species directly reflects how reliable outline-based
+identification can be. Color features from the RGB and HSV color
+systems describe the chromatic properties of the leaf surface after
+the background has been removed, and the standard deviations within
+each species reveal how uniformly a species expresses its color across
+different images. Together, these features let us determine which
+species are most reliably characterized, which features best
+distinguish species from one another, and where the visual boundaries
+between species hold up and where they break down.
+
+# Dataset Overview
+
+\indent The Swedish Leaf Dataset was compiled by Söderkvist (2001)
+at the Computer Vision Laboratory at Linköping University and is
+publicly available at the CVL research datasets page. The dataset
+contains 1,125 high-resolution scanned leaf images across 15 Swedish
+tree species with 75 images per species, stored as .tif files. Images
+follow a systematic naming convention — for example l9nr003.tif
+refers to the third image of species 9 — making automated file
+loading straightforward to implement. All leaves were scanned against
+a bright white background under consistent lighting conditions,
+ensuring that observed differences between species reflect genuine
+morphological variation rather than imaging artifacts.
+
+\indent For this report, 10 species are analyzed — Species 1 through
+10 in the dataset — using 10 images per species, yielding a total of
+100 images. These 10 species were selected to cover a range of leaf
+forms while keeping processing time manageable, and the 10 images per
+species provide sufficient within-species variation to compute
+reliable summary statistics. Table 1 lists all 10 species included
+in the analysis.
+
+\indent Two key references guide the analytical approach. Söderkvist
+(2001) establishes that leaf shape is the most stable and
+discriminating feature, noting that color and surface features are
+less reliable due to their sensitivity to season, lighting, and leaf
+age. Zheng and Wang (2010) demonstrate that vein patterns extracted
+through gray-scale morphological operations provide additional inner
+structural information that shape analysis alone cannot capture.
+While this report does not implement vein extraction, their pipeline
+directly informs the preprocessing approach used here, particularly
+the grayscale conversion and binary thresholding steps used to
+isolate the leaf from the background.
+
+```{r species-table}
+knitr::kable(
+  species_names[, c("species_id", "common_name")],
+  col.names = c("Species ID", "Scientific Name"),
+  caption   = "The 10 species analyzed in this report.",
+  format    = "latex",
+  booktabs  = TRUE
+) |>
+  kable_styling(
+    latex_options = c("striped", "hold_position"),
+    full_width    = FALSE,
+    font_size     = 10
+  )
+```
+
+```{r step1, include=FALSE}
+plot_color <- function(img, main = "") {
+  plot.new()
+  rasterImage(as.raster(img), 0, 0, 1, 1)
+  title(main = main)
+}
+
+plot_gray <- function(mat, main = "") {
+  image(1:ncol(mat), 1:nrow(mat),
+        t(mat[nrow(mat):1, ]),
+        col  = gray(seq(0, 1, length.out = 256)),
+        axes = FALSE, xlab = "", ylab = "", main = main)
+}
+
+plot_binary <- function(mat, main = "") {
+  image(1:ncol(mat), 1:nrow(mat),
+        t(mat[nrow(mat):1, ]),
+        col  = c("black", "white"),
+        axes = FALSE, xlab = "", ylab = "", main = main)
+}
+
+process_leaf_image <- function(file, threshold = 200) {
+  img        <- image_read(file)
+  img        <- image_resize(img, "1200x1200>")
+  gray_img   <- image_convert(img, colorspace = "gray")
+  gray_array <- image_data(gray_img, channels = "gray")
+  gray_mat   <- matrix(as.integer(gray_array[1, , ]),
+                       nrow = dim(gray_array)[2],
+                       ncol = dim(gray_array)[3])
+  binary_mat    <- ifelse(gray_mat > threshold, 1, 0)
+  leaf_mask     <- gray_mat <= threshold
+  lab           <- bwlabel(Image(leaf_mask))
+  tab           <- table(as.vector(lab))
+  tab           <- tab[names(tab) != "0"]
+  largest_label <- as.numeric(names(tab)[which.max(tab)])
+  leaf_clean    <- lab == largest_label
+  leaf_clean    <- fillHull(leaf_clean)
+  edge          <- leaf_clean & !erode(leaf_clean,
+                                       makeBrush(3, shape = "box"))
+  edge_mat      <- as.matrix(edge) * 1
+  list(img        = img,
+       gray_mat   = gray_mat,
+       binary_mat = binary_mat,
+       leaf_clean = leaf_clean,
+       edge_mat   = edge_mat)
+}
+```
+
+# Data Preprocessing
+
+\indent Prior to extracting shape and color features, each leaf image
+in the Swedish Leaf Dataset requires a preprocessing pipeline to
+isolate the leaf from the background. Raw images are high-resolution
+.tif scans captured against a bright white background, which makes
+automated segmentation straightforward and consistent across all
+species. The pipeline follows four stages — grayscale conversion,
+binary thresholding, connected component filtering, and contour
+extraction — consistent with the approach described by Söderkvist
+(2001) and informed by the gray-scale morphology techniques of Zheng
+and Wang (2010).
+
+\indent Figure 1 displays the four-stage pipeline applied to a
+representative leaf image from Ulmus carpinifolia. In the first
+stage, the original color image is converted to grayscale, reducing
+each pixel to a single brightness value between 0 and 255, which
+simplifies the image while preserving the contrast between the
+darker leaf tissue and the bright background. In the second stage,
+a binary threshold of 200 is applied — pixels with grayscale values
+greater than 200 are classified as background and set to white,
+while pixels at or below 200 are classified as leaf and set to
+black. In the third stage, the largest connected component is
+retained using bwlabel() to remove small dark artifacts outside
+the leaf, and fillHull() fills any internal holes to produce a
+clean solid leaf mask. In the fourth stage, the leaf contour is
+extracted using an 8-neighborhood erosion approach, where boundary
+pixels are identified as leaf pixels that have at least one
+background pixel among their eight immediate neighbors.
+
+```{r pipeline-example, fig.height=5, fig.cap="Figure 1. Four-stage preprocessing pipeline applied to Ulmus carpinifolia. From left to right: original color image, grayscale image, binary image (threshold = 200), and extracted leaf contour."}
+test_file <- get_species_files(1, base_dir, n = 1)
+result    <- process_leaf_image(test_file, threshold)
+
+par(mfrow = c(2, 2), mar = c(1, 1, 3, 1))
+plot_color(result$img,        "Stage 1: Original Color Image")
+plot_gray(result$gray_mat,    "Stage 2: Grayscale Image")
+plot_binary(result$binary_mat,
+            paste0("Stage 3: Binary (Threshold = ", threshold, ")"))
+plot_binary(result$edge_mat,  "Stage 4: Leaf Contour")
+```
+
+\indent The threshold value of 200 was selected based on the imaging
+characteristics of the Swedish Leaf Dataset. Figure 2 compares three
+threshold values — 150, 200, and 230 — applied to the same leaf
+image to justify this selection. A threshold of 150 incorrectly
+excludes lighter leaf regions near the margins, producing an
+incomplete leaf mask that underrepresents the true leaf area. A
+threshold of 230 begins incorporating bright background pixels into
+the leaf region, introducing noise along the edges that contaminates
+the extracted contour. A threshold of 200 most cleanly separates
+the leaf from the background, and is therefore applied consistently
+across all 10 species throughout the analysis.
+
+```{r threshold-comparison, fig.height=3, fig.cap="Figure 2. Comparison of three binary threshold values applied to the same leaf image. A threshold of 200 most cleanly separates the leaf from the background."}
+par(mfrow = c(1, 3), mar = c(1, 1, 3, 1))
+for (th in c(150, 200, 230)) {
+  binary_mat <- ifelse(result$gray_mat > th, 1, 0)
+  plot_binary(binary_mat, paste0("Threshold = ", th))
+}
+```
+
+\indent The pipeline was applied to all 10 species analyzed in this
+report, confirming successful leaf isolation despite considerable
+variation in leaf size, shape, and color across species. The
+resulting leaf images and extracted contours for all 10 species are
+presented in Figure 8 in the Species Characterization section, where
+the visual profiles provide direct confirmation of the quantitative
+characterizations produced by the shape and color analyses.
+
+```{r step2, include=FALSE}
+compute_perimeter4 <- function(mask) {
+  mask   <- as.matrix(mask) > 0
+  padded <- matrix(FALSE, nrow(mask) + 2, ncol(mask) + 2)
+  padded[2:(nrow(mask)+1), 2:(ncol(mask)+1)] <- mask
+  center <- padded[2:(nrow(mask)+1), 2:(ncol(mask)+1)]
+  up     <- padded[1:nrow(mask),     2:(ncol(mask)+1)]
+  down   <- padded[3:(nrow(mask)+2), 2:(ncol(mask)+1)]
+  left   <- padded[2:(nrow(mask)+1), 1:ncol(mask)]
+  right  <- padded[2:(nrow(mask)+1), 3:(ncol(mask)+2)]
+  sum(center & !up) + sum(center & !down) +
+    sum(center & !left) + sum(center & !right)
+}
+
+compute_perimeter8 <- function(mask) {
+  mask   <- as.matrix(mask) > 0
+  padded <- matrix(FALSE, nrow(mask) + 2, ncol(mask) + 2)
+  padded[2:(nrow(mask)+1), 2:(ncol(mask)+1)] <- mask
+  center <- padded[2:(nrow(mask)+1), 2:(ncol(mask)+1)]
+  up     <- padded[1:nrow(mask),     2:(ncol(mask)+1)]
+  down   <- padded[3:(nrow(mask)+2), 2:(ncol(mask)+1)]
+  left   <- padded[2:(nrow(mask)+1), 1:ncol(mask)]
+  right  <- padded[2:(nrow(mask)+1), 3:(ncol(mask)+2)]
+  ul     <- padded[1:nrow(mask),     1:ncol(mask)]
+  ur     <- padded[1:nrow(mask),     3:(ncol(mask)+2)]
+  dl     <- padded[3:(nrow(mask)+2), 1:ncol(mask)]
+  dr     <- padded[3:(nrow(mask)+2), 3:(ncol(mask)+2)]
+  straight <- sum(center & !up)  + sum(center & !down) +
+              sum(center & !left) + sum(center & !right)
+  diagonal <- sum(center & !ul)  + sum(center & !ur) +
+              sum(center & !dl)  + sum(center & !dr)
+  straight + diagonal * sqrt(2)
+}
+
+compute_length_width <- function(mask) {
+  mask   <- as.matrix(mask) > 0
+  coords <- which(mask, arr.ind = TRUE)
+  if (nrow(coords) < 2) return(list(length = NA, width = NA))
+  pca    <- prcomp(coords, center = TRUE, scale. = FALSE)
+  scores <- pca$x
+  list(length = diff(range(scores[, 1])),
+       width  = diff(range(scores[, 2])))
+}
+
+compute_symmetry <- function(mask) {
+  mask  <- as.matrix(mask) > 0
+  cols  <- which(colSums(mask) > 0)
+  mid   <- round(mean(range(cols)))
+  left_area  <- sum(mask[, cols[cols <= mid]])
+  right_area <- sum(mask[, cols[cols >  mid]])
+  total      <- left_area + right_area
+  list(left_pct  = left_area  / total * 100,
+       right_pct = right_area / total * 100)
+}
+
+extract_shape_features <- function(file, sp_num, threshold = 200) {
+  r    <- process_leaf_image(file, threshold)
+  mask <- as.matrix(r$leaf_clean) > 0
+  area    <- sum(mask)
+  perim4  <- compute_perimeter4(mask)
+  perim8  <- compute_perimeter8(mask)
+  lw      <- compute_length_width(mask)
+  compact <- (perim4^2) / (4 * pi * area)
+  sym     <- compute_symmetry(mask)
+  data.frame(
+    species      = paste0("Species_", sp_num),
+    filename     = basename(file),
+    area_px      = area,
+    perimeter4   = perim4,
+    perimeter8   = round(perim8, 1),
+    length_px    = round(lw$length, 1),
+    width_px     = round(lw$width,  1),
+    aspect_ratio = round(lw$length / lw$width, 3),
+    compactness  = round(compact, 3),
+    left_pct     = round(sym$left_pct,  1),
+    right_pct    = round(sym$right_pct, 1)
+  )
+}
+
+all_shape <- list()
+
+for (sp in species_ids) {
+  files <- get_species_files(sp, base_dir, n_images)
+  message("Processing shape for species ", sp, "...")
+  for (f in files) {
+    row <- tryCatch(
+      extract_shape_features(f, sp, threshold),
+      error = function(e) {
+        message("Skipped: ", basename(f))
+        NULL
+      }
+    )
+    if (!is.null(row)) all_shape[[length(all_shape)+1]] <- row
+  }
+}
+
+shape_df <- do.call(rbind, all_shape)
+
+shape_df$species <- species_names$common_name[
+  match(shape_df$species, species_names$species_code)
+]
+
+shape_summary <- aggregate(
+  cbind(area_px, perimeter4, perimeter8,
+        length_px, width_px, aspect_ratio,
+        compactness, left_pct, right_pct) ~ species,
+  data = shape_df,
+  FUN  = mean
+)
+shape_summary$species <- species_names$common_name
+shape_summary[, -1]   <- round(shape_summary[, -1], 2)
+```
+
+# Shape Analysis
+
+## Shape Feature Definitions
+
+\indent Shape features are extracted from the binary leaf mask
+produced by the preprocessing pipeline, with seven features computed
+for each image: area, perimeter, length, width, aspect ratio,
+compactness, and symmetry. Area measures the total number of pixels
+belonging to the leaf, directly reflecting overall leaf size. 
+Perimeter is computed using both 4-neighborhood and 8-neighborhood
+connectivity — the 4-neighborhood perimeter counts boundary pixels
+along the four cardinal directions, while the 8-neighborhood
+perimeter incorporates diagonal neighbors weighted by $\sqrt{2}$,
+producing a smoother and more geometrically accurate boundary length
+estimate. Length and width are derived from principal component
+analysis applied to the leaf pixel coordinates, where length
+corresponds to the spread along the first principal component —
+the main axis of the leaf — and width corresponds to the spread
+along the second principal component. Aspect ratio divides length
+by width, producing a unitless measure of elongation where values
+close to 1 indicate a round or broad leaf and higher values
+indicate a narrow elongated leaf. Compactness is computed as the
+perimeter squared divided by $4\pi$ times the area, equaling 1
+for a perfect circle and increasing with greater margin
+irregularity or serration, making it particularly useful for
+distinguishing species with serrated or lobed margins from those
+with smooth ones. Symmetry measures the percentage of leaf area
+falling on the left side of the vertical midpoint of the bounding
+box, with values near 50% indicating a symmetric leaf and values
+further from 50% indicating asymmetry relative to the main vein.
+
+## What Outlines Can Characterize
+
+\indent Leaf outlines effectively capture geometric properties that
+are stable across images of the same species and meaningfully
+different between species, making them a reliable foundation for
+species identification. Aspect ratio reliably distinguishes narrow
+elongated leaves from broad rounded ones, as the overall shape of
+a leaf is a biologically stable characteristic that does not change
+with season or lighting conditions. Compactness captures the
+complexity of the leaf margin — a highly serrated or lobed leaf
+consistently produces a much higher compactness score than a
+smooth-margined leaf regardless of imaging conditions, as confirmed
+by Populus tremula's compactness score of 40.27 compared to a
+range of 3.66 to 11.34 across all other species. Symmetry reveals
+consistent patterns in how leaf tissue is distributed relative to
+the main vein, which Söderkvist (2001) identifies as a stable
+morphological characteristic that reflects genuine biological
+differences between species rather than imaging variation.
+Together, aspect ratio, compactness, and symmetry form the most
+discriminating shape features in this analysis, collectively
+capable of identifying species at the extremes of the feature
+distributions with high reliability.
+
+## What Outlines Cannot Characterize
+
+\indent Despite their stability, outline features present important
+limitations that constrain their ability to fully characterize all
+10 species. Color information is entirely absent from outline
+analysis — Söderkvist (2001) notes that color is inherently
+unreliable due to its sensitivity to season, lighting conditions,
+leaf age, and position on the tree, which limits its value as a
+standalone identifier but does not eliminate its usefulness as a
+complementary feature. Surface texture properties such as
+glossiness and hairiness, which may help distinguish visually
+similar species, are similarly invisible from the outline alone.
+Most critically, inner structural features such as vein patterns
+— which Zheng and Wang (2010) demonstrate can be extracted through
+gray-scale morphological operations — cannot be captured from the
+leaf boundary alone, representing a meaningful gap in the
+characterization that outline features provide. As demonstrated
+in the shape results, five species — Salix aurita, Quercus, Alnus
+incana, Sorbus aucuparia, and Salix alba 'Sericea' — cluster
+closely in both aspect ratio and compactness, confirming that
+outline features alone are insufficient to distinguish all species
+and motivating the addition of color features in the following
+section.
+
+## Shape Results
+
+\indent Figure 3 presents the distribution of four key shape features across
+the 10 species analyzed. As shown in the aspect ratio plot, Betula pubescens
+stands out with a median aspect ratio of 5.39, indicating leaves that are more
+than five times longer than they are wide — a level of elongation not observed
+in any other species. This is further confirmed by its width of only 201.88
+pixels despite a length of 1,056 pixels, reflecting a characteristically
+narrow leaf form. All remaining species fall between aspect ratios of 1.27 and
+2.08. Among these, Salix alba 'Sericea' (2.08) and a width of 506.82 pixels
+occupies a middle ground — moderately elongated but notably narrower than
+Ulmus carpinifolia, making it visually intermediate between the broadest and
+most elongated species. Sorbus aucuparia (1.96) and Alnus incana (1.87) are
+the next most elongated after Betula pubescens and Salix alba 'Sericea', while
+Ulmus carpinifolia (1.27) and Salix aurita (1.46) are the broadest and most
+rounded species in the analysis.
+
+\indent The compactness plot reveals Populus tremula as a dramatic
+outlier with a score of 40.27 — more than seven times higher than
+any other species in the analysis. Populus tremula is the European
+aspen, a species characterized by a distinctly toothed and
+irregular leaf margin that directly accounts for its exceptionally
+high compactness score, reflecting genuine biological differences
+in leaf morphology rather than measurement error. This is further
+confirmed by its 8-neighborhood perimeter of 37,359, nearly three
+times its 4-neighborhood perimeter of 12,235, providing additional
+evidence of an exceptionally irregular and complex leaf boundary
+unlike any other species analyzed. All remaining species produce
+compactness scores between 3.66 and 11.34, with Ulmus carpinifolia
+recording the second highest score at 11.34 — suggesting a
+moderately irregular margin — while the remaining eight species
+cluster tightly between 3.66 and 5.66, indicating predominantly
+smooth leaf margins. The area plot reveals that Ulmus glabra
+produces the largest leaves on average with 407,211 pixels,
+followed by Sorbus aucuparia at 391,996 and Salix aurita at
+342,182, while Betula pubescens produces the smallest leaves at
+112,844 pixels — consistent with its narrow elongated form
+identified in the aspect ratio analysis.
+
+\indent Table 2 reveals additional patterns in leaf dimensions and
+perimeter measurements that further distinguish species beyond the
+box plot comparisons. Length values are relatively consistent across
+species, ranging from 855.94 pixels in Acer to 1,095.06 pixels in
+Populus tremula — a difference of only 239 pixels — suggesting that
+length alone provides limited discriminating power and should not
+be used as a standalone identifier. Width, however, shows
+considerably more variation across species, with Ulmus carpinifolia
+producing the widest leaves on average at 812.35 pixels — nearly
+four times wider than Betula pubescens at 201.88 pixels —
+reinforcing the stark contrast in leaf form between these two
+species that the aspect ratio analysis identified. The 4-neighborhood
+perimeter further confirms Populus tremula's unique boundary
+complexity, with a value of 12,235 compared to a range of 2,827
+to 5,902 across the remaining nine species, a difference that
+reflects its distinctly toothed and irregular margin rather than
+simply a larger leaf size. Ulmus carpinifolia records the second
+highest 4-neighborhood perimeter at 5,902 — combined with its
+large width of 812.35 pixels — suggesting a particularly broad
+and expansive leaf shape that, alongside its strong asymmetry,
+makes it one of the more distinctive species in the shape analysis.
+
+\indent The symmetry plot reveals considerable variation in
+left-right leaf balance across species, with asymmetry emerging
+as one of the most biologically meaningful shape features in the
+analysis. Ulmus carpinifolia exhibits the strongest asymmetry with
+89.07% of its leaf area on the left side of the main vein,
+followed by Quercus at 86.80% and Acer at 76.51% — a pattern
+that reflects genuine morphological characteristics rather than
+measurement inconsistency. The pronounced asymmetry in Ulmus
+carpinifolia is particularly meaningful from a biological
+standpoint, as elm leaves are characteristically asymmetric at
+the base, with the two sides of the leaf differing noticeably in
+size — a trait that persists consistently across all 10 images
+analyzed and confirms symmetry as a reliable identifier for this
+species. Alnus incana (65.04%) falls between the asymmetric and
+symmetric extremes, while Sorbus aucuparia (45.32%), Ulmus glabra
+(46.78%), and Salix aurita (54.26%) are the most symmetric
+species, with leaf area nearly evenly distributed on both sides
+of the main vein. Notably, Ulmus glabra at 46.78% left and a
+large area of 407,211 pixels presents a broad symmetric leaf
+profile that contrasts strongly with Ulmus carpinifolia despite
+the two species sharing the same genus — suggesting that symmetry
+is a more reliable distinguishing feature between these two
+related species than area or aspect ratio alone, and reinforcing
+that morphological divergence can occur even within the same
+taxonomic group.
+
+\indent A critical finding from the shape analysis is the degree
+of overlap between several species in the middle of the feature
+distributions. Salix aurita (aspect ratio 1.46, compactness 4.83),
+Quercus (1.50, 4.61), Alnus incana (1.87, 4.74), Sorbus aucuparia
+(1.96, 3.66), and Salix alba 'Sericea' (2.08, 3.94) are all
+closely grouped in both aspect ratio and compactness, producing
+feature profiles that are nearly indistinguishable from one
+another by shape alone. This overlap directly addresses the
+research question — shape features reliably characterize species
+at the extremes of the feature distributions, as demonstrated by
+Betula pubescens (aspect ratio 5.39) and Populus tremula
+(compactness 40.27), but show limited discriminating power for
+species with similar overall forms, confirming that color features
+are necessary to complete the characterization of these five
+overlapping species.
+
+\indent The consistency of shape features within each species
+provides important evidence about the reliability of outline-based
+characterization across the 10 species analyzed. Betula pubescens
+shows the tightest interquartile range in aspect ratio, indicating
+that its narrow elongated form is highly stable and reproducible
+across all 10 images, making it the most reliably characterized
+species by shape alone. Populus tremula similarly shows the
+tightest range in compactness, confirming that its irregular
+boundary is a stable characteristic that persists consistently
+across images rather than reflecting variation in individual
+leaves. In contrast, Quercus and Alnus incana show wider
+interquartile ranges in both area and aspect ratio, reflecting
+greater within-species variability that reduces the reliability
+of these features as identifiers for these two species
+specifically. Ulmus carpinifolia shows the widest range in
+symmetry, suggesting that while its leaves are consistently
+asymmetric, the degree of asymmetry varies noticeably across
+individual images — a finding that highlights the distinction
+between a feature being directionally consistent and being
+precisely reproducible. Collectively, these patterns of
+within-species consistency and variability directly address the
+research question, confirming that the reliability of shape-based
+leaf characterization depends not only on between-species
+differences but on the stability of features within each species
+across multiple images.
+
+```{r shape-boxplots, fig.height=5, fig.cap="Figure 3. Distribution of four shape features across 10 species. Aspect ratio measures elongation, compactness measures margin irregularity, area measures leaf size, and symmetry measures the percentage of leaf area on the left side of the main vein."}
+par(mfrow = c(2, 2), mar = c(10, 4, 3, 1))
+
+boxplot(aspect_ratio ~ species, data = shape_df,
+        main     = "Aspect Ratio by Species",
+        xlab     = "",
+        ylab     = "Aspect Ratio",
+        col      = "lightblue",
+        las      = 2,
+        cex.axis = 0.6)
+
+boxplot(compactness ~ species, data = shape_df,
+        main     = "Compactness by Species",
+        xlab     = "",
+        ylab     = "Compactness",
+        col      = "lightgreen",
+        las      = 2,
+        cex.axis = 0.6)
+
+boxplot(area_px ~ species, data = shape_df,
+        main     = "Area by Species",
+        xlab     = "",
+        ylab     = "Area (pixels)",
+        col      = "lightyellow",
+        las      = 2,
+        cex.axis = 0.6)
+
+boxplot(left_pct ~ species, data = shape_df,
+        main     = "Symmetry (Left %) by Species",
+        xlab     = "",
+        ylab     = "Left Side %",
+        col      = "lightcoral",
+        las      = 2,
+        cex.axis = 0.6)
+```
+
+\indent Table 2 presents the average shape features across all 10
+species, providing a comprehensive numerical summary of the patterns
+identified in Figure 3. The values confirm that Betula pubescens
+and Populus tremula are the most uniquely identifiable species based
+on shape features alone — Betula pubescens through its extreme
+aspect ratio of 5.39 and Populus tremula through its extreme
+compactness score of 40.27, both of which are far removed from all
+other species in the analysis. The remaining eight species show
+considerably greater overlap in shape characteristics, particularly
+in aspect ratio and compactness, with five species — Salix aurita,
+Quercus, Alnus incana, Sorbus aucuparia, and Salix alba 'Sericea'
+— producing feature profiles that are nearly indistinguishable from
+one another. These findings reinforce that shape features alone are
+insufficient to precisely characterize all 10 species and that
+color features are necessary to resolve the ambiguities that remain
+among the overlapping central cluster.
+
+```{r shape-table}
+knitr::kable(shape_summary,
+             caption  = "Table 2. Average shape features by species.",
+             digits   = 2,
+             format   = "latex",
+             booktabs = TRUE) |>
+  kable_styling(
+    latex_options = c("striped", "scale_down", "hold_position"),
+    full_width    = FALSE,
+    font_size     = 7
+  )
+```
+
+```{r step3, include=FALSE}
+extract_color_features <- function(file, sp_num, threshold = 200) {
+  r    <- process_leaf_image(file, threshold)
+  mask <- as.matrix(r$leaf_clean) > 0
+  img  <- r$img
+  rgb_array <- image_data(img, channels = "rgb")
+  R_mat <- matrix(as.integer(rgb_array[1,,]),
+                  nrow=dim(rgb_array)[2], ncol=dim(rgb_array)[3])
+  G_mat <- matrix(as.integer(rgb_array[2,,]),
+                  nrow=dim(rgb_array)[2], ncol=dim(rgb_array)[3])
+  B_mat <- matrix(as.integer(rgb_array[3,,]),
+                  nrow=dim(rgb_array)[2], ncol=dim(rgb_array)[3])
+  R_leaf <- R_mat[mask]
+  G_leaf <- G_mat[mask]
+  B_leaf <- B_mat[mask]
+  hsv    <- rgb2hsv(r=R_leaf, g=G_leaf, b=B_leaf,
+                    maxColorValue=255)
+  data.frame(
+    species  = paste0("Species_", sp_num),
+    filename = basename(file),
+    mean_R   = round(mean(R_leaf), 2),
+    mean_G   = round(mean(G_leaf), 2),
+    mean_B   = round(mean(B_leaf), 2),
+    sd_R     = round(sd(R_leaf),   2),
+    sd_G     = round(sd(G_leaf),   2),
+    sd_B     = round(sd(B_leaf),   2),
+    mean_H   = round(mean(hsv["h",]), 4),
+    mean_S   = round(mean(hsv["s",]), 4),
+    mean_V   = round(mean(hsv["v",]), 4),
+    sd_H     = round(sd(hsv["h",]),   4),
+    sd_S     = round(sd(hsv["s",]),   4),
+    sd_V     = round(sd(hsv["v",]),   4)
+  )
+}
+
+all_color <- list()
+
+for (sp in species_ids) {
+  files <- get_species_files(sp, base_dir, n_images)
+  message("Processing color for species ", sp, "...")
+  for (f in files) {
+    row <- tryCatch(
+      extract_color_features(f, sp, threshold),
+      error = function(e) {
+        message("Skipped: ", basename(f))
+        NULL
+      }
+    )
+    if (!is.null(row)) all_color[[length(all_color)+1]] <- row
+  }
+}
+
+color_df <- do.call(rbind, all_color)
+
+color_df$species <- species_names$common_name[
+  match(color_df$species, species_names$species_code)
+]
+
+color_summary <- aggregate(
+  cbind(mean_R, mean_G, mean_B, sd_R, sd_G, sd_B,
+        mean_H, mean_S, mean_V, sd_H, sd_S, sd_V) ~ species,
+  data = color_df,
+  FUN  = mean
+)
+color_summary$species <- species_names$common_name
+color_summary[, -1]   <- round(color_summary[, -1], 4)
+```
+
+# Color Analysis
+
+## Why Color Features Are Needed
+
+\indent As demonstrated in the shape analysis, shape features alone
+prove insufficient to distinguish all 10 species, particularly
+among the five species — Salix aurita, Quercus, Alnus incana,
+Sorbus aucuparia, and Salix alba 'Sericea' — that cluster closely
+in both aspect ratio and compactness, producing feature profiles
+that are nearly indistinguishable from one another by outline
+alone. Color features provide complementary information about leaf
+physiology and condition that outline analysis cannot capture —
+different species exhibit systematically different amounts of
+chlorophyll, surface wax, and pigmentation, which manifest as
+measurable and consistent differences in RGB and HSV color
+characteristics across images of the same species. However,
+Söderkvist (2001) cautions that color is not fully stable, as it
+varies with season, lighting conditions, leaf age, and position
+on the tree — a limitation reflected in the low coefficient of
+variation for Mean Hue (8.82%) and Mean Saturation (8.91%)
+identified in the feature effectiveness analysis. For this reason,
+color features are analyzed alongside shape features rather than
+as standalone identifiers, and within-species standard deviations
+are used throughout this section to assess how consistently each
+species expresses its color characteristics across the 10 images
+analyzed.
+
+## RGB Analysis
+
+\indent The RGB color system describes each pixel using three
+channels — Red, Green, and Blue — each ranging from 0 to 255,
+where higher values indicate greater intensity of that color
+component. Only leaf pixels are included in the color analysis,
+with background pixels masked out during the preprocessing
+pipeline to ensure that computed color statistics reflect the
+leaf surface exclusively. Figure 4 presents the mean RGB and HSV
+values averaged across 10 images per species, providing a
+comprehensive overview of the color characteristics of each
+species.
+
+```{r color-plots, fig.height=6, fig.cap="Figure 4. Mean RGB channel values (top row) and mean HSV values (bottom row) by species averaged across 10 images per species. The dashed green line on the Hue plot marks the pure green reference value of 0.33."}
+par(mfrow = c(2, 3), mar = c(10, 4, 3, 1))
+
+barplot(color_summary$mean_R,
+        names.arg = color_summary$species,
+        main      = "Mean Red Channel",
+        ylab      = "Mean R (0-255)",
+        col       = "lightcoral",
+        las       = 2,
+        cex.names = 0.55)
+
+barplot(color_summary$mean_G,
+        names.arg = color_summary$species,
+        main      = "Mean Green Channel",
+        ylab      = "Mean G (0-255)",
+        col       = "lightgreen",
+        las       = 2,
+        cex.names = 0.55)
+
+barplot(color_summary$mean_B,
+        names.arg = color_summary$species,
+        main      = "Mean Blue Channel",
+        ylab      = "Mean B (0-255)",
+        col       = "lightblue",
+        las       = 2,
+        cex.names = 0.55)
+
+barplot(color_summary$mean_H,
+        names.arg = color_summary$species,
+        main      = "Mean Hue",
+        ylab      = "Hue",
+        col       = "gold",
+        las       = 2,
+        cex.names = 0.55)
+abline(h = 0.33, col = "darkgreen", lty = 2)
+
+barplot(color_summary$mean_S,
+        names.arg = color_summary$species,
+        main      = "Mean Saturation",
+        ylab      = "Saturation",
+        col       = "lightgreen",
+        las       = 2,
+        cex.names = 0.55)
+
+barplot(color_summary$mean_V,
+        names.arg = color_summary$species,
+        main      = "Mean Brightness",
+        ylab      = "Value",
+        col       = "lightblue",
+        las       = 2,
+        cex.names = 0.55)
+```
+
+\indent Figure 4 reveals meaningful variation in RGB channel values
+across the 10 species analyzed. The Red channel ranges from 60.49
+in Quercus to 86.86 in Ulmus glabra, with Ulmus glabra (86.86)
+and Salix alba 'Sericea' (83.43) producing the highest Red values
+and Quercus (60.49) and Betula pubescens (69.75) producing the
+lowest. The Green channel follows a similar pattern — Ulmus glabra
+(87.15) and Salix alba 'Sericea' (87.34) produce the highest
+Green values, while Quercus (49.51) produces by far the lowest,
+more than 37 points below the next lowest species Acer (66.51).
+This unusually low Green value for Quercus is a particularly
+notable finding — despite being a green-leafed species, its
+relatively dark appearance produces lower RGB values across all
+three channels compared to most other species, reflecting a
+genuine difference in leaf pigmentation rather than an imaging
+artifact. The Blue channel shows the most dramatic variation
+across species, ranging from 6.28 in Betula pubescens to 29.88
+in Sorbus aucuparia — a nearly fivefold difference that makes
+the Blue channel the most discriminating RGB feature in the
+analysis. Betula pubescens stands out with an exceptionally low
+Blue value of 6.28 — less than half the Blue value of any other
+species — indicating a very pure green color with almost no blue
+component, consistent with its highest saturation value of 0.9529
+identified in the HSV analysis. At the other extreme, Sorbus
+aucuparia (29.88), Ulmus glabra (21.39), and Populus tremula
+(20.90) record the three highest Blue values, giving these
+species a slightly cooler green tone, while the remaining species
+cluster between 10.13 and 18.15.
+
+\indent The standard deviations of RGB channels provide critical
+evidence about within-species color consistency across the 10
+images analyzed per species. Populus tremula shows the highest
+variability across all three channels with sd_R of 34.21, sd_G
+of 34.95, and sd_B of 44.91 — by far the most variable species
+in RGB color — a finding that is consistent with its complex and
+irregular leaf boundary identified in the shape analysis and
+suggests that its surface color is similarly heterogeneous across
+the leaf surface. In contrast, Salix alba 'Sericea' shows the
+lowest RGB variability with sd_R of 23.34, sd_G of 22.61, and
+sd_B of 23.57, indicating highly consistent color expression
+across images and establishing it as one of the most reliably
+characterized species by color in the analysis. Ulmus glabra
+similarly shows low variability with sd_R of 21.52 and sd_G of
+22.13, further supporting its characterization as a species with
+stable and reproducible color properties — a finding consistent
+with its low Hue standard deviation of 0.0163 identified in the
+HSV analysis.
+
+## HSV Analysis
+
+\indent The HSV color system describes each pixel using three
+components — Hue, Saturation, and Value — and is particularly
+useful for leaf analysis because it separates color type from
+brightness, making it easier to identify meaningful differences
+between species that may appear similar in overall brightness but
+differ in color tone. Hue indicates the basic color type on a
+scale from 0 to 1, where values near 0.33 represent pure green,
+values below 0.20 represent yellow-green tones, and values above
+0.33 represent blue-green tones. Saturation describes how vivid
+or pure the color is, with lower values appearing more grayish,
+and Value measures brightness, with higher values corresponding
+to lighter leaves. Figure 4 presents mean Hue, Saturation, and
+Value averaged across 10 images per species, with the dashed
+green line on the Hue plot marking the pure green reference
+value of 0.33.
+
+\indent The Hue analysis reveals that all 10 species produce mean
+Hue values between 0.1272 and 0.1750 — well below the pure green
+reference of 0.33 — confirming that all species express a
+yellow-green tone consistent with scanned leaf images. Despite
+this overall similarity, meaningful differences exist between
+species that carry discriminating power. Salix alba 'Sericea'
+produces the highest mean Hue of 0.1750, indicating the most
+green-toned leaves in the analysis, while Quercus produces the
+lowest at 0.1272, followed by Sorbus aucuparia (0.1439) and Acer
+(0.1500) — indicating a notably more yellow-green tone in these
+three species compared to the rest. Within-species Hue standard
+deviations are consistently low across most species, with Salix
+alba 'Sericea' (sd_H 0.0174), Ulmus glabra (0.0163), and Salix
+aurita (0.0211) showing the most stable Hue values, confirming
+that color tone is a reliable and reproducible characteristic for
+these species. Populus tremula, by contrast, shows the least
+stable Hue with sd_H of 0.0718 — more than four times higher
+than Salix alba 'Sericea' — indicating highly inconsistent color
+tone across its images, consistent with the high RGB variability
+identified in the prior section.
+
+\indent Saturation values range from 0.6760 in Sorbus aucuparia
+to 0.9529 in Betula pubescens, revealing considerable variation
+in color vividness across species. Betula pubescens produces the
+most vivid and pure green color of all species at 0.9529 —
+consistent with its extremely low Blue channel value of 6.28
+identified in the RGB analysis — while Salix alba 'Sericea'
+(0.9147) and Quercus (0.8779) also show high saturation. Sorbus
+aucuparia at 0.6760 is a clear outlier, with a saturation more
+than 0.17 points below the next lowest species Ulmus glabra
+(0.8014), indicating a notably muted and grayish green appearance
+that distinguishes it colorimetrically from all other species
+despite its otherwise average shape profile. Within-species
+Saturation standard deviations further reveal important
+consistency patterns — Betula pubescens shows the lowest sd_S
+of 0.1442, confirming highly consistent color vividness across
+images and reinforcing its status as one of the most reliably
+characterized species in the analysis, while Acer shows the
+highest sd_S of 0.2276, indicating considerable variability in
+how vividly its color is expressed across different images and
+reducing the reliability of saturation as an identifier for
+this species specifically.
+
+\indent Value — measuring leaf brightness — ranges from 0.2380
+in Quercus to 0.3479 in Ulmus glabra, with Ulmus glabra (0.3479)
+and Salix alba 'Sericea' (0.3456) producing the brightest leaves
+and Quercus (0.2380) and Betula pubescens (0.2805) producing the
+darkest. The brightness contrast between Quercus and Ulmus glabra
+is particularly striking — Ulmus glabra is nearly 46% brighter
+on average, a difference that is clearly visible in the bar plot
+and reflects a genuine difference in leaf surface properties
+between these two species. Within-species Value standard
+deviations reveal that Salix alba 'Sericea' shows the lowest
+sd_V of 0.0892, indicating very consistent brightness across
+images and further establishing it as one of the most reliably
+characterized species across all three HSV components, while
+Populus tremula shows the highest sd_V of 0.1349 — reinforcing
+its standing as the most color-variable species in the dataset
+across Hue, Saturation, and Value simultaneously.
+
+## HSV Distributions by Species
+
+\indent Figure 5 presents the full HSV and RGB pixel-level
+distributions for three representative species — Betula pubescens,
+Quercus, and Sorbus aucuparia — selected to represent the most
+vivid, darkest, and most muted color profiles in the dataset
+respectively. These histograms reveal the complete shape of the
+color distribution within each leaf image, providing additional
+evidence about within-species color consistency that summary
+statistics alone cannot capture.
+
+\indent The Hue distributions in Figure 5 reveal important
+pixel-level patterns across the three representative species.
+Betula pubescens shows a consistently narrow and concentrated
+Hue distribution, confirming highly uniform color tone across
+the leaf surface and supporting its characterization as one of
+the most reliably identified species by color. Sorbus aucuparia,
+by contrast, displays a bimodal Hue distribution with a primary
+peak around 0.15 and a secondary peak between 0.5 and 0.9 —
+a finding not visible in the mean Hue value of 0.1439 alone —
+suggesting the presence of two distinct color zones on the leaf
+surface that reflect genuine within-leaf color variation rather
+than imaging noise. Quercus shows a narrow Hue distribution
+consistent with its low sd_H of 0.0373, confirming that despite
+its unusually low mean Hue of 0.1272, its color tone is stable
+and reproducible across the leaf surface.
+
+\indent Saturation distributions are dominated by a sharp spike
+near 1.0 across all three species, indicating that the vast
+majority of leaf pixels are highly saturated regardless of
+species. This pattern is particularly notable for Sorbus
+aucuparia — despite its low mean saturation of 0.6760, its
+histogram reveals that the low mean is driven by a subset of
+lower-saturation pixels rather than a uniformly spread
+distribution, suggesting localized color variation across the
+leaf surface rather than globally muted color. Betula pubescens
+shows the sharpest and most concentrated saturation spike near
+1.0, consistent with its highest mean saturation of 0.9529 and
+lowest sd_S of 0.1442, confirming that nearly all of its leaf
+pixels express highly vivid color with minimal variation.
+
+\indent Value distributions are approximately right-skewed across
+all three species, peaking between 0.2 and 0.4 with a tail
+extending toward higher brightness values. Quercus shows the
+leftmost Value peak, consistent with its lowest mean brightness
+of 0.2380, while Sorbus aucuparia peaks further right consistent
+with its mean brightness of 0.3167. The Red channel distributions
+provide additional insight — Quercus shows a broad spread from
+0 to 200 peaking around 50 to 75, reflecting its wide range of
+red intensities across the leaf surface, while Betula pubescens
+shows a tighter Red distribution peaking around 75 consistent
+with its low sd_R of 25.33. Both Betula pubescens and Quercus
+show Blue channel histograms almost entirely concentrated below
+25, consistent with their very low mean Blue values of 6.28 and
+11.96 respectively, while Sorbus aucuparia shows a notably wider
+Blue distribution extending to 50 and beyond — consistent with
+its highest mean Blue value of 29.88 and directly confirming
+that the Blue channel is the most discriminating RGB feature
+for distinguishing Sorbus aucuparia from the other species.
+
+```{r hsv-histograms, fig.height=10, fig.cap="Figure 5. HSV and RGB pixel distributions for three representative species — Betula pubescens (most vivid), Quercus (darkest), and Sorbus aucuparia (most muted)."}
+representative_species <- c(6, 4, 10)
+
+for (sp in representative_species) {
+  sp_label <- species_names$common_name[sp]
+  f        <- get_species_files(sp, base_dir, n = 1)
+  r        <- process_leaf_image(f, threshold)
+  mask     <- as.matrix(r$leaf_clean) > 0
+  img      <- r$img
+
+  rgb_array <- image_data(img, channels = "rgb")
+  R_mat <- matrix(as.integer(rgb_array[1,,]),
+                  nrow=dim(rgb_array)[2], ncol=dim(rgb_array)[3])
+  G_mat <- matrix(as.integer(rgb_array[2,,]),
+                  nrow=dim(rgb_array)[2], ncol=dim(rgb_array)[3])
+  B_mat <- matrix(as.integer(rgb_array[3,,]),
+                  nrow=dim(rgb_array)[2], ncol=dim(rgb_array)[3])
+
+  R_leaf <- R_mat[mask]
+  G_leaf <- G_mat[mask]
+  B_leaf <- B_mat[mask]
+  hsv    <- rgb2hsv(r=R_leaf, g=G_leaf, b=B_leaf,
+                    maxColorValue=255)
+
+  par(mfrow = c(2, 3), mar = c(4, 4, 3, 1))
+  hist(hsv["h",], breaks=30,
+       main=paste0(sp_label, " - Hue"),
+       xlab="H", col="gold")
+  hist(hsv["s",], breaks=30,
+       main=paste0(sp_label, " - Saturation"),
+       xlab="S", col="lightgreen")
+  hist(hsv["v",], breaks=30,
+       main=paste0(sp_label, " - Value"),
+       xlab="V", col="lightblue")
+  hist(R_leaf, breaks=30,
+       main=paste0(sp_label, " - Red"),
+       xlab="R", col="lightcoral", xlim=c(0,255))
+  hist(G_leaf, breaks=30,
+       main=paste0(sp_label, " - Green"),
+       xlab="G", col="lightgreen", xlim=c(0,255))
+  hist(B_leaf, breaks=30,
+       main=paste0(sp_label, " - Blue"),
+       xlab="B", col="lightblue", xlim=c(0,255))
+}
+```
+
+## Color Summary Table
+
+\indent Table 3 presents the complete color feature summary
+averaged across 10 images per species, providing a comprehensive
+numerical reference for the patterns identified across the RGB
+and HSV analyses. Collectively, these values confirm that color
+features provide important complementary information to shape
+features — particularly for the five species that overlap closely
+in shape characteristics and cannot be reliably distinguished by
+outline alone. Quercus and Sorbus aucuparia are especially well
+differentiated by color despite their similar shape profiles —
+Quercus records the lowest Hue (0.1272), lowest Green channel
+(49.51), and lowest Value (0.2380) of all species analyzed,
+while Sorbus aucuparia records the lowest Saturation (0.6760)
+and highest Blue channel (29.88), giving each species a
+distinctive color fingerprint that shape features alone cannot
+capture and confirming that color analysis successfully resolves
+at least part of the ambiguity left by the shape analysis.
+Alnus incana presents a middle-ground color profile with mean
+RGB values of 73.84, 72.96, and 12.97 and a mean Hue of 0.1617,
+placing it among the most colorimetrically average species in
+the dataset and making it one of the harder species to identify
+by either shape or color alone — a finding that underscores the
+need for additional features such as vein patterns to complete
+its characterization. Ulmus carpinifolia similarly occupies a
+central color position with a mean Hue of 0.1618 and moderate
+saturation of 0.8851, though its high asymmetry score of 89.07%
+from the shape analysis provides the primary identifying
+characteristic for this species — reinforcing the central
+finding of this report that the most reliable characterization
+combines evidence from both shape and color features
+simultaneously rather than relying on either alone.
+
+```{r color-table}
+knitr::kable(color_summary,
+             caption  = "Table 3. Average color features by species.",
+             digits   = 4,
+             format   = "latex",
+             booktabs = TRUE) |>
+  kable_styling(
+    latex_options = c("striped", "scale_down", "hold_position"),
+    full_width    = FALSE,
+    font_size     = 7
+  )
+```
+
+```{r step4, include=FALSE}
+master_summary <- merge(shape_summary, color_summary,
+                        by = "species")
+
+normalize <- function(x) (x - min(x)) / (max(x) - min(x))
+
+feature_matrix <- data.frame(
+  aspect_ratio = shape_summary$aspect_ratio,
+  compactness  = shape_summary$compactness,
+  area         = shape_summary$area_px,
+  left_pct     = shape_summary$left_pct,
+  mean_H       = color_summary$mean_H,
+  mean_S       = color_summary$mean_S,
+  mean_V       = color_summary$mean_V,
+  mean_R       = color_summary$mean_R,
+  mean_G       = color_summary$mean_G,
+  mean_B       = color_summary$mean_B
+)
+rownames(feature_matrix) <- species_names$common_name
+dist_matrix <- as.matrix(dist(scale(feature_matrix)))
+
+char_df <- data.frame(
+  Species    = species_names$common_name,
+  Shape      = ifelse(shape_summary$aspect_ratio > 2.5,
+                      "Narrow/Elongated", "Broad/Rounded"),
+  Margin     = ifelse(shape_summary$compactness > 15,
+                      "Irregular/Serrated", "Smooth"),
+  Symmetry   = ifelse(abs(shape_summary$left_pct - 50) < 10,
+                      "Symmetric", "Asymmetric"),
+  Color_Tone = ifelse(color_summary$mean_H < 0.15,
+                      "Yellow-Green",
+                      ifelse(color_summary$mean_H < 0.20,
+                             "Typical Green", "Blue-Green")),
+  Vividness  = ifelse(color_summary$mean_S > 0.9,
+                      "Very Vivid",
+                      ifelse(color_summary$mean_S > 0.8,
+                             "Moderately Vivid", "Muted")),
+  Brightness = ifelse(color_summary$mean_V > 0.33,
+                      "Bright",
+                      ifelse(color_summary$mean_V > 0.27,
+                             "Moderate", "Dark"))
+)
+```
+
+# Species Characterization
+
+\indent This section synthesizes the shape and color findings from
+the preceding analyses to build a precise characterization of each
+of the 10 species analyzed, directly addressing the research
+question by assessing the degree to which combined shape and color
+features capture consistent within-species visual identity and
+reveal meaningful between-species boundaries. Figure 6 presents
+a radar chart comparing all 10 species across seven normalized
+features — aspect ratio, compactness, area, symmetry, hue,
+saturation, and brightness — where each axis is scaled from 0
+to 1 relative to the range of values observed across species,
+allowing direct visual comparison of each species' combined
+feature profile. Figure 7 presents the pairwise distance heatmap,
+which quantifies the overall similarity between every pair of
+species across all 10 shape and color features combined, with
+darker cells indicating more similar species pairs and lighter
+cells indicating more different ones. Together, these two
+visualizations provide the most comprehensive view of species
+separability in this analysis, revealing which species are most
+reliably characterized, which pairs are hardest to distinguish,
+and where the visual boundaries between species are strongest
+and most fragile.
+
+```{r radar-chart, fig.height=5, fig.cap="Figure 6. Radar chart comparing all 10 species across seven normalized shape and color features. Each axis represents one feature scaled from 0 to 1. Species further from the center on a given axis score higher on that feature relative to all others."}
+normalize <- function(x) (x - min(x)) / (max(x) - min(x))
+
+radar_data <- data.frame(
+  aspect_ratio = normalize(shape_summary$aspect_ratio),
+  compactness  = normalize(shape_summary$compactness),
+  area         = normalize(shape_summary$area_px),
+  symmetry     = normalize(shape_summary$left_pct),
+  hue          = normalize(color_summary$mean_H),
+  saturation   = normalize(color_summary$mean_S),
+  brightness   = normalize(color_summary$mean_V)
+)
+rownames(radar_data) <- species_names$common_name
+radar_data <- rbind(rep(1, ncol(radar_data)),
+                    rep(0, ncol(radar_data)),
+                    radar_data)
+
+colors_border <- c("#E41A1C","#377EB8","#4DAF4A","#984EA3",
+                   "#FF7F00","#A65628","#F781BF","#999999",
+                   "#66C2A5","#FC8D62")
+colors_fill <- adjustcolor(colors_border, alpha.f = 0.1)
+
+par(mar = c(1, 1, 2, 1))
+radarchart(radar_data,
+           axistype   = 1,
+           pcol       = colors_border,
+           pfcol      = colors_fill,
+           plwd       = 2,
+           cglcol     = "grey",
+           cglty      = 1,
+           axislabcol = "grey",
+           vlcex      = 0.8,
+           title      = "Species Comparison — Shape & Color Features")
+
+legend("topright",
+       legend = species_names$common_name,
+       col    = colors_border,
+       lty = 1, lwd = 2,
+       cex = 0.5, bty = "n")
+```
+
+```{r heatmap, fig.height=5, fig.cap="Figure 7. Pairwise distance heatmap across all 10 shape and color features combined. Darker cells indicate more similar species pairs and lighter cells indicate more different species pairs."}
+feature_matrix <- data.frame(
+  aspect_ratio = shape_summary$aspect_ratio,
+  compactness  = shape_summary$compactness,
+  area         = shape_summary$area_px,
+  left_pct     = shape_summary$left_pct,
+  mean_H       = color_summary$mean_H,
+  mean_S       = color_summary$mean_S,
+  mean_V       = color_summary$mean_V,
+  mean_R       = color_summary$mean_R,
+  mean_G       = color_summary$mean_G,
+  mean_B       = color_summary$mean_B
+)
+rownames(feature_matrix) <- species_names$common_name
+
+dist_matrix <- as.matrix(dist(scale(feature_matrix)))
+
+dist_df <- data.frame(
+  Species1 = rep(rownames(dist_matrix), each  = nrow(dist_matrix)),
+  Species2 = rep(rownames(dist_matrix), times = nrow(dist_matrix)),
+  Distance = as.vector(dist_matrix)
+)
+
+ggplot(dist_df, aes(x=Species1, y=Species2, fill=Distance)) +
+  geom_tile() +
+  scale_fill_gradient(low="darkgreen", high="white") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle=45, hjust=1, size=7),
+        axis.text.y = element_text(size=7)) +
+  labs(title    = "Pairwise Distance Between Species",
+       subtitle = "Darker = more similar, Lighter = more different",
+       x="", y="", fill="Distance")
+```
+
+\indent The radar chart in Figure 6 immediately highlights the two
+most distinctive species in the dataset. Betula pubescens (brown)
+extends dramatically outward on the aspect ratio axis — the only
+species to reach near 100% on this dimension — confirming its
+uniquely narrow elongated form with an aspect ratio of 5.39 that
+is more than 2.5 times higher than the next most elongated
+species. Simultaneously, Betula pubescens reaches near the outer
+edge on the saturation axis with a mean saturation of 0.9529,
+combining high elongation with vivid color to produce the most
+visually distinctive overall profile in the dataset. Populus
+tremula (grey) extends dramatically outward on the compactness
+axis — the only species to reach near 100% on this dimension —
+reflecting its compactness score of 40.27, a level of boundary
+complexity that is in a category of its own relative to all
+other species. These two species occupy opposite extremes of the
+feature space and are the most reliably characterized species in
+the entire analysis, each defined by a single dominant feature
+that no other species approaches.
+
+\indent The remaining axes of the radar chart reveal additional
+patterns in species separability. The symmetry axis shows a
+clear split between asymmetric and symmetric species — Ulmus
+carpinifolia (red) and Quercus (purple) extend furthest,
+consistent with their left side percentages of 89.07% and
+86.80% respectively, while Sorbus aucuparia, Ulmus glabra, and
+Betula pubescens cluster near the center reflecting their
+near-symmetric profiles. The saturation axis distinguishes
+Sorbus aucuparia (orange) as the species extending least far —
+consistent with its uniquely low mean saturation of 0.6760 —
+while Betula pubescens and Salix alba 'Sericea' extend furthest
+with saturation values of 0.9529 and 0.9147 respectively. The
+brightness axis shows Salix alba 'Sericea' (pink) and Ulmus
+glabra (teal) extending furthest, consistent with their highest
+mean brightness values of 0.3456 and 0.3479, collectively
+confirming that these two species are the most reliably
+characterized by brightness among all species analyzed.
+
+\indent The pairwise distance heatmap in Figure 7 quantifies
+the overall similarity between every pair of species across all
+10 shape and color features combined. The darkest cell in the
+heatmap — indicating the most similar pair — corresponds to
+Alnus incana and Salix aurita, confirming the computed most
+similar pair in the dataset. These two species share nearly
+identical profiles across all features: both are broad and
+rounded with aspect ratios of 1.87 and 1.46, both have smooth
+margins with compactness scores of 4.74 and 4.83, both express
+typical green tones with mean Hue values of 0.1617 and 0.1676,
+and both show moderate saturation of 0.8744 and 0.8291 and
+moderate brightness of 0.2994 and 0.3150 respectively. This
+degree of similarity across both shape and color features
+confirms that Alnus incana and Salix aurita are the hardest
+pair to distinguish reliably using image-based characterization
+alone, and that additional features such as vein patterns or
+surface texture — as described by Zheng and Wang (2010) and
+Söderkvist (2001) respectively — would likely be required to
+separate them.
+
+\indent At the opposite extreme, the lightest cell in the
+heatmap — indicating the most different pair — corresponds to
+Ulmus glabra and Quercus, confirming the computed most
+different pair. Ulmus glabra and Quercus differ substantially
+across multiple dimensions simultaneously: Ulmus glabra has
+the largest area (407,211 pixels) while Quercus has a much
+smaller area (321,667 pixels); Ulmus glabra is nearly symmetric
+(46.78% left) while Quercus is strongly asymmetric (86.80%
+left); Ulmus glabra has the highest brightness (0.3479) while
+Quercus has the lowest (0.2380); and Ulmus glabra has a higher
+Hue (0.1667) while Quercus records the lowest Hue in the
+dataset (0.1272). The fact that these two species differ across
+area, symmetry, brightness, and Hue simultaneously — four
+independent feature dimensions — makes their combined distance
+the largest in the dataset and confirms that their
+characterization is the most reliable of any pair analyzed,
+consistent with the research question's focus on identifying
+where visual boundaries between species are strongest.
+
+\indent The heatmap also reveals important clustering patterns
+among the remaining species. Acer (aspect ratio 2.04,
+compactness 3.95, Hue 0.1500, saturation 0.8206), Alnus incana,
+and Salix aurita form a visibly dark cluster in the heatmap,
+indicating that these three species are mutually similar and
+represent the most challenging group to distinguish by combined
+shape and color features. All three share broad rounded shapes,
+smooth margins, typical green tones, and moderate saturation
+and brightness — a convergence of similar feature values across
+both shape and color that limits the reliability of
+image-based characterization for this group. Salix alba
+'Sericea' shows moderate distance from most other species —
+darker cells with Ulmus glabra and Salix aurita but lighter
+cells with Quercus and Betula pubescens — reflecting its
+intermediate position in the feature space with the highest
+Hue in the dataset (0.1750), a distinctive brightness of
+0.3456, and high saturation of 0.9147 that partially separates
+it from the central cluster. Sorbus aucuparia shows moderate
+to light distances from most species, with its unique
+combination of lowest saturation (0.6760) and highest Blue
+channel (29.88) providing a partially distinctive color
+profile that distinguishes it from the central cluster despite
+an otherwise average shape.
+
+\indent Table 4 presents a categorical summary of each species
+across seven characterization dimensions derived from the
+combined shape and color analysis. Betula pubescens is the
+only species classified as narrow and elongated with an aspect
+ratio of 5.39, making it immediately identifiable by outline
+alone, while Populus tremula is the only species classified as
+having an irregular or serrated margin with a compactness score
+of 40.27 — together, these two species represent the clearest
+cases of reliable shape-based identification in the analysis.
+Among the remaining eight species, all classified as broad and
+rounded with smooth margins, symmetry and color features become
+the primary discriminating tools. Ulmus carpinifolia (89.07%
+left) and Quercus (86.80% left) are the only strongly
+asymmetric species — Quercus further distinguished by the
+lowest brightness (0.2380) and lowest Hue (0.1272) in the
+dataset, giving it the most distinctive combined profile among
+the smooth-margined species. Salix alba 'Sericea' and Ulmus
+glabra are the only two species classified as bright with
+brightness values of 0.3456 and 0.3479, while Salix alba
+'Sericea' further distinguishes itself with the highest Hue
+(0.1750) and high saturation (0.9147). Sorbus aucuparia stands
+alone as the only species with muted color vividness (saturation
+0.6760), making it the most colorimetrically distinctive species
+among the eight smooth-margined species despite an otherwise
+average shape profile (aspect ratio 1.96, compactness 3.66) —
+a finding that confirms color features successfully resolve at
+least one ambiguity that shape features alone cannot.
+
+```{r char-table}
+knitr::kable(char_df,
+             caption  = "Table 4. Categorical characterization summary
+             of all 10 species across shape and color dimensions.",
+             format   = "latex",
+             booktabs = TRUE) |>
+  kable_styling(
+    latex_options = c("striped", "scale_down", "hold_position"),
+    full_width    = FALSE,
+    font_size     = 8
+  )
+```
+
+\indent Figure 8 presents a representative leaf image and extracted
+contour for each of the 10 species, providing visual confirmation
+of the quantitative characterizations produced by the shape and
+color analyses. The narrow elongated form of Betula pubescens —
+quantified by its aspect ratio of 5.39 and width of only 201.88
+pixels — is immediately visible in its contour image, producing
+a distinctly thin outline that is unlike any other species in
+the analysis and directly confirms its status as the most
+shape-distinctive species. The irregular serrated boundary of
+Populus tremula — reflected in its compactness score of 40.27
+and 8-neighborhood perimeter of 37,359 — is clearly visible as
+a highly complex and jagged contour that stands in stark
+contrast to the smooth outlines of all other species, visually
+confirming that its extreme compactness score reflects genuine
+morphological complexity rather than a measurement artifact.
+The strong asymmetry of Ulmus carpinifolia (89.07% left) is
+clearly visible in both the leaf image and contour, with
+substantially more tissue on one side of the main axis —
+a visual confirmation of the symmetry analysis that identifies
+this species as the most asymmetric in the dataset. The broad
+symmetric profiles of Ulmus glabra (46.78% left, area 407,211
+pixels), Salix aurita (54.26% left), and Sorbus aucuparia
+(45.32% left) produce clean rounded contours that are visually
+similar to one another, consistent with their close proximity
+in the pairwise distance heatmap and reinforcing the critical
+finding that these species cannot be reliably distinguished
+by shape alone and require color features to complete their
+characterization.
+
+```{r species-profiles, fig.height=10, fig.cap="Figure 8. Representative leaf images (top two rows) and extracted contours (bottom two rows) for all 10 species analyzed."}
+par(mfrow = c(4, 5), mar = c(1, 1, 2, 1))
+
+for (sp in species_ids) {
+  sp_label <- species_names$common_name[sp]
+  f        <- get_species_files(sp, base_dir, n = 1)
+  result   <- process_leaf_image(f, threshold)
+  plot_color(result$img, sp_label)
+}
+
+for (sp in species_ids) {
+  sp_label <- species_names$common_name[sp]
+  f        <- get_species_files(sp, base_dir, n = 1)
+  result   <- process_leaf_image(f, threshold)
+  plot_binary(result$edge_mat, paste0(sp_label, " contour"))
+}
+```
+
+```{r step5, include=FALSE}
+cv <- function(x) sd(x) / mean(x) * 100
+
+feature_effectiveness <- data.frame(
+  Feature = c("Aspect Ratio","Compactness","Area",
+              "Symmetry","Mean Hue","Mean Saturation",
+              "Mean Brightness","Mean Red","Mean Green",
+              "Mean Blue"),
+  CV = round(c(
+    cv(shape_summary$aspect_ratio),
+    cv(shape_summary$compactness),
+    cv(shape_summary$area_px),
+    cv(shape_summary$left_pct),
+    cv(color_summary$mean_H),
+    cv(color_summary$mean_S),
+    cv(color_summary$mean_V),
+    cv(color_summary$mean_R),
+    cv(color_summary$mean_G),
+    cv(color_summary$mean_B)
+  ), 2)
+)
+feature_effectiveness <- feature_effectiveness[
+  order(feature_effectiveness$CV, decreasing = TRUE), ]
+
+diag(dist_matrix) <- NA
+
+min_idx <- which(dist_matrix == min(dist_matrix, na.rm=TRUE),
+                 arr.ind = TRUE)[1, ]
+most_similar <- paste(rownames(dist_matrix)[min_idx[1]],
+                      "and",
+                      colnames(dist_matrix)[min_idx[2]])
+
+max_idx <- which(dist_matrix == max(dist_matrix, na.rm=TRUE),
+                 arr.ind = TRUE)[1, ]
+most_different <- paste(rownames(dist_matrix)[max_idx[1]],
+                        "and",
+                        colnames(dist_matrix)[max_idx[2]])
+```
+
+# Conclusion
+
+\indent This report characterized 10 Swedish tree leaf species
+from the Swedish Leaf Dataset using morphological shape features
+extracted from leaf outlines and chromatic color features
+extracted from RGB and HSV color systems, with 10 images per
+species yielding a total of 100 images analyzed. The analysis
+addressed the following question: to what degree do shape and
+color features capture consistent within-species visual identity,
+and what do patterns of within-species consistency and
+between-species distance reveal about the reliability of
+image-based leaf characterization? The findings demonstrate
+that shape and color features together provide a reliable basis
+for characterizing most species, but that their discriminating
+power varies substantially across both individual features and
+species pairs — a pattern that reflects genuine differences in
+the morphological and chromatic distinctiveness of each species
+rather than limitations of the methodology.
+
+## Feature Effectiveness
+
+\indent Figure 9 presents the coefficient of variation for each
+of the 10 features extracted in this analysis, ranked from most
+to least discriminating, to assess which features contribute
+most reliably to species characterization. The coefficient of
+variation measures how much a feature varies across species
+relative to its mean — higher values indicate features that
+differ more between species and are therefore more useful for
+characterization — and provides a direct quantitative basis for
+evaluating the reliability of each feature as an identifier
+across the 10 species analyzed.
+
+```{r feature-effectiveness, fig.height=4, fig.cap="Figure 9. Feature effectiveness ranked by coefficient of variation. Features with CV above 20% shown in dark green are considered highly discriminating across species."}
+par(mar = c(8, 4, 3, 1))
+barplot(feature_effectiveness$CV,
+        names.arg = feature_effectiveness$Feature,
+        main      = "Feature Effectiveness (Higher = More Useful)",
+        ylab      = "Coefficient of Variation (%)",
+        col       = ifelse(feature_effectiveness$CV > 20,
+                           "darkgreen", "lightgreen"),
+        las       = 2,
+        cex.names = 0.8)
+abline(h = 20, col = "red", lty = 2)
+```
+
+\indent Figure 9 reveals compactness as by far the most
+discriminating feature in the analysis, with a coefficient of
+variation of 130.51% — more than twice the CV of any other
+feature. This extreme discriminating power is almost entirely
+driven by Populus tremula's compactness score of 40.27, which
+is more than seven times higher than all other species,
+confirming that compactness is the single most reliable feature
+for species identification when a highly irregular or serrated
+leaf is present. Aspect ratio ranks second with a CV of 56.13%,
+driven primarily by Betula pubescens at 5.39 — more than 2.5
+times the next highest species — establishing it as the second
+most discriminating shape feature and confirming that the two
+most reliably characterized species in the analysis are each
+defined by a single dominant shape feature. Mean Blue channel
+ranks third with a CV of 42.28%, driven by the contrast between
+Betula pubescens at the low extreme (6.28) and Sorbus aucuparia
+at the high extreme (29.88) — a nearly fivefold difference —
+making the Blue channel the most discriminating color feature
+in the analysis and the only color feature to rank among the
+top three overall. Area ranks fourth with a CV of 32.15%,
+reflecting the substantial size variation from Betula pubescens
+(112,844 pixels) to Ulmus glabra (407,211 pixels), while
+symmetry ranks fifth with a CV of 27.93%, capturing the
+contrast between strongly asymmetric species such as Ulmus
+carpinifolia (89.07% left) and nearly symmetric species such
+as Sorbus aucuparia (45.32% left).
+
+\indent The five features above the red dashed threshold of
+20% CV — compactness, aspect ratio, Mean Blue, area, and
+symmetry — collectively represent the most reliable set of
+features for image-based leaf characterization, with three
+shape features and only one color feature among the top five
+discriminators. In contrast, the five features below the
+threshold — Mean Green (14.83%), Mean Brightness (10.48%),
+Mean Red (9.86%), Mean Saturation (8.91%), and Mean Hue
+(8.82%) — show limited between-species variation and
+contribute less to species discrimination, a pattern that
+is consistent with Söderkvist (2001)'s observation that color
+features are less stable and reliable than shape features
+across varying imaging conditions. The low CV of Mean Hue
+(8.82%) is particularly notable — while all 10 species
+express yellow-green tones, the differences in Hue between
+species are small relative to within-species variation,
+limiting its discriminating power and confirming that Hue
+alone is insufficient for reliable species identification.
+Mean Saturation (8.91%) similarly shows limited variation,
+as most species cluster between 0.82 and 0.95 with only
+Sorbus aucuparia (0.6760) as a meaningful outlier —
+reinforcing that the most reliable color features for
+discrimination are those tied to the extremes of the
+distribution rather than the central tendency.
+
+## Reliability of Characterization
+
+\indent The patterns of within-species consistency and
+between-species distance collectively reveal that the
+reliability of image-based leaf characterization is not
+uniform across species — it depends directly on the degree
+to which a species expresses a distinctive and stable visual
+identity across multiple feature dimensions simultaneously.
+Species at the extremes of the most discriminating features
+— Betula pubescens in aspect ratio (5.39) and compactness,
+Populus tremula in compactness (40.27), Ulmus carpinifolia
+in symmetry (89.07% left), and Quercus in Hue (0.1272) and
+brightness (0.2380) — are the most reliably characterized
+because their defining features are both highly consistent
+within the species across 10 images and highly distinct from
+all other species, producing tight interquartile ranges that
+confirm stable and reproducible visual identities.
+
+\indent In contrast, the five species in the central cluster
+— Acer, Alnus incana, Salix aurita, Salix alba 'Sericea',
+and Ulmus glabra — show considerable overlap in the most
+discriminating features, making them harder to characterize
+reliably from shape and color alone. Alnus incana and Salix
+aurita represent the most extreme case of this overlap —
+confirmed as the most similar pair in the dataset — with
+nearly identical aspect ratios (1.87 and 1.46), compactness
+scores (4.74 and 4.83), Hue values (0.1617 and 0.1676), and
+saturation values (0.8744 and 0.8291) that produce feature
+profiles indistinguishable from one another across both shape
+and color dimensions. The reliability of characterization for
+these two species is fundamentally limited by the convergence
+of their visual properties, and their discrimination would
+require additional features beyond shape and color — most
+likely vein pattern extraction following Zheng and Wang (2010)
+or surface texture analysis as described by Söderkvist (2001)
+— reinforcing that the limits of image-based characterization
+are not methodological but biological in nature.
+
+\indent Ulmus glabra and Quercus represent the opposite extreme
+as the most different pair in the dataset, separated by large
+and simultaneous differences across area (407,211 vs 321,667
+pixels), symmetry (46.78% vs 86.80% left), brightness (0.3479
+vs 0.2380), and Hue (0.1667 vs 0.1272). The fact that these
+two species differ across four independent feature dimensions
+at once makes their combined distance the largest in the
+dataset and confirms that their characterization is the most
+reliable of any pair analyzed — a finding consistent with
+the research question, which proposed that species expressing
+distinctive visual identities across multiple feature types
+simultaneously would be the most reliably characterized by
+image-based methods. The contrast between Alnus incana and
+Salix aurita on one end and Ulmus glabra and Quercus on the
+other establishes the practical boundaries of image-based
+leaf characterization — from species pairs that are nearly
+indistinguishable to species pairs that are maximally
+separable — and provides a clear framework for understanding
+where automated leaf identification is most and least reliable.
+
+## Limitations
+
+\indent Several limitations arose in this analysis and should be
+considered when interpreting these findings. Color features are
+not fully stable across imaging conditions — as Söderkvist (2001)
+notes, leaf color varies with season, lighting, leaf age, and
+position on the tree — a limitation directly reflected in the low
+CV values for Mean Hue (8.82%) and Mean Saturation (8.91%),
+which are the two least discriminating features in the analysis
+and would likely be even less reliable across images collected
+under varying conditions. The binary threshold of 200 was
+selected by visual inspection and may not be optimal for all
+images across all species — a more principled threshold
+selection method such as Otsu's method, as described by Zheng
+and Wang (2010), could produce more consistent and reproducible
+segmentation results and reduce the sensitivity of the pipeline
+to imaging variation. Symmetry was approximated using the
+vertical midpoint of the bounding box rather than the true main
+vein position — a more precise symmetry measure using the vein
+extraction technique of Zheng and Wang (2010) would produce
+more biologically meaningful results and strengthen the
+reliability of symmetry as an identifier, particularly for
+species such as Ulmus carpinifolia where the degree of
+asymmetry varies noticeably across images. Only 10 of 75
+available images per species were used, which may not fully
+capture the within-species variation present in the full
+dataset — species with high within-species variability such
+as Populus tremula (sd_R 34.21, sd_H 0.0718) may produce
+different characterizations with a larger sample, and the
+reliability of the characterizations presented here should
+be interpreted with this constraint in mind. Finally, inner
+structural features such as vein patterns were not extracted
+in this analysis — incorporating vein analysis following Zheng
+and Wang (2010) would provide an additional layer of
+characterization that could resolve the ambiguities that
+remain between the most similar species pairs, particularly
+Alnus incana and Salix aurita, whose nearly identical shape
+and color profiles suggest that vein structure may be the
+most promising distinguishing feature between them.
+
+## Conclusion
+
+\indent Shape and color features extracted from scanned leaf
+images provide a reliable basis for characterizing most Swedish
+tree leaf species, with the discriminating power of individual
+features varying substantially across the feature set in a
+pattern that reflects genuine differences in species
+morphological and chromatic distinctiveness. Compactness
+(CV 130.51%), aspect ratio (CV 56.13%), and Mean Blue channel
+(CV 42.28%) emerge as the three most discriminating features,
+collectively capable of identifying the most visually
+distinctive species — Betula pubescens, Populus tremula, and
+Sorbus aucuparia — with high reliability. The pairwise distance
+analysis confirms that Ulmus glabra and Quercus are the most
+separable pair in the dataset while Alnus incana and Salix
+aurita are the least separable, establishing clear and
+quantifiable boundaries for where image-based characterization
+succeeds and where it reaches its limits — a finding that
+directly and precisely answers the research question posed at
+the outset of this report.
+
+\indent The biological and computational findings converge to
+establish that reliable leaf characterization requires
+combining multiple feature types simultaneously rather than
+relying on shape or color alone. Shape features successfully
+identify species with extreme geometric properties — Betula
+pubescens through its narrow elongation (aspect ratio 5.39)
+and Populus tremula through its irregular margin (compactness
+40.27) — but fail to distinguish the five species in the
+central cluster that share similar aspect ratios and
+compactness scores. Color features provide complementary
+information that partially resolves these ambiguities,
+particularly through the Blue channel (CV 42.28%) and
+saturation, but the low CV values of Hue (8.82%) and
+Saturation (8.91%) confirm Söderkvist (2001)'s caution that
+color is inherently less stable than shape as an identifying
+characteristic and should be treated as a supplementary
+rather than primary identifier. Together, the patterns of
+within-species consistency and between-species distance
+reveal that image-based leaf characterization is most
+reliable for species that express distinctive visual
+identities across multiple feature dimensions simultaneously
+— as demonstrated by Betula pubescens and Populus tremula
+— and least reliable for species that share similar shapes
+and similar color profiles — as demonstrated by Alnus incana
+and Salix aurita — a finding that motivates future work
+incorporating vein pattern extraction following Zheng and
+Wang (2010) and surface texture analysis following Söderkvist
+(2001) to complete the characterization of the most visually
+similar species in the dataset.
+
+# References
+
+Söderkvist, Oskar. 2001. "Computer Vision Classification of Leaves from
+Swedish Trees." Master's Thesis, Linköping University. Computer Vision
+Laboratory, Department of Electrical Engineering, Linköping University,
+Sweden.
+
+Zheng, Xiaodong, and Xiaojie Wang. 2010. "Leaf Vein Extraction Based on
+Gray-Scale Morphology." *International Journal of Image, Graphics and
+Signal Processing* 2(2): 25--31.
+
+\newpage
+
+# Appendix: Full Code
+
+```{r appendix, ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
